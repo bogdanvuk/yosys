@@ -70,6 +70,7 @@ namespace AST
 		AST_COVER,
 		AST_ENUM,
 		AST_ENUM_ITEM,
+		AST_STRUCT,
 
 		AST_FCALL,
 		AST_TO_BITS,

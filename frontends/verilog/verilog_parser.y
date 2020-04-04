@@ -127,7 +127,7 @@ struct specify_rise_fall {
 	specify_triple fall;
 };
 
-static void addTypedefNode(std::string *name, AstNode *node)
+static AstNode* addTypedefNode(std::string *name, AstNode *node)
 {
 	log_assert(node);
 	auto *tnode = new AstNode(AST_TYPEDEF, node);
@@ -141,6 +141,7 @@ static void addTypedefNode(std::string *name, AstNode *node)
 	}
 	delete name;
 	ast_stack.back()->children.push_back(tnode);
+	return tnode;
 }
 
 static void enterTypeScope()
@@ -220,7 +221,7 @@ static void addRange(AstNode *parent, int msb = 31, int lsb = 0, bool isSigned =
 %token TOK_GENERATE TOK_ENDGENERATE TOK_GENVAR TOK_REAL
 %token TOK_SYNOPSYS_FULL_CASE TOK_SYNOPSYS_PARALLEL_CASE
 %token TOK_SUPPLY0 TOK_SUPPLY1 TOK_TO_SIGNED TOK_TO_UNSIGNED
-%token TOK_POS_INDEXED TOK_NEG_INDEXED TOK_PROPERTY TOK_ENUM TOK_TYPEDEF
+%token TOK_POS_INDEXED TOK_NEG_INDEXED TOK_PROPERTY TOK_ENUM TOK_TYPEDEF TOK_STRUCT TOK_PACKED
 %token TOK_RAND TOK_CONST TOK_CHECKER TOK_ENDCHECKER TOK_EVENTUALLY
 %token TOK_INCREMENT TOK_DECREMENT TOK_UNIQUE TOK_PRIORITY
 
@@ -1398,6 +1399,29 @@ enum_base_type: int_vec param_range
 	| /* nothing */		{astbuf1->is_reg = true; addRange(astbuf1); }
 	;
 
+struct_type: TOK_STRUCT TOK_PACKED {
+		/* static int struct_count; */
+		// create the template for the names
+		astbuf2 = new AstNode(AST_STRUCT);
+		/* astbuf1->attributes[ID("type")] = AstNode::mkconst_int(1, false); */
+		/* ast_stack.back()->children.push_back(astbuf1); */
+		ast_stack.push_back(astbuf2);
+		/* enterTypeScope(); */
+	 } '{' struct_union_memberList '}' {  // create template for the enum vars
+			 astbuf1 = ast_stack.back();
+			 ast_stack.pop_back();
+			 /* exitTypeScope(); */
+								/* auto tnode = astbuf1->clone(); */
+								/* delete astbuf1; */
+								/* astbuf1 = tnode; */
+								/* tnode->type = AST_WIRE; */
+								/* tnode->attributes["\\enum_type"] = AstNode::mkconst_str(astbuf2->str); */
+								/* // drop constant but keep any range */
+								/* delete tnode->children[0]; */
+								/* tnode->children.erase(tnode->children.begin()); */
+		 }
+	 ;
+
 int_atom: TOK_INTEGER		{astbuf1->is_reg=true; addRange(astbuf1); }		// probably should do byte, range [7:0] here
 	;
 
@@ -1645,6 +1669,10 @@ type_name: TOK_ID		// first time seen
 	 | TOK_USER_TYPE	{ if (isInLocalScope($1)) frontend_verilog_yyerror("Duplicate declaration of TYPEDEF '%s'", $1->c_str()+1); }
 	 ;
 
+struct_union_memberList : // IEEE: { struct_union_member }
+	 wire_decl
+	 | struct_union_memberList wire_decl;
+
 typedef_decl:
 	TOK_TYPEDEF wire_type range type_name range_or_multirange ';' {
 		astbuf1 = $2;
@@ -1683,8 +1711,9 @@ typedef_decl:
 	} |
 	TOK_TYPEDEF enum_type type_name ';' {
 		addTypedefNode($3, astbuf1);
-	}
-	;
+	} | TOK_TYPEDEF struct_type type_name ';' {
+		addTypedefNode($3, astbuf1);
+	};
 
 cell_stmt:
 	attr TOK_ID {

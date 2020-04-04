@@ -281,6 +281,8 @@ static bool isUserType(std::string &s)
 
 "enum"    { SV_KEYWORD(TOK_ENUM); }
 "typedef" { SV_KEYWORD(TOK_TYPEDEF); }
+"packed"  { SV_KEYWORD(TOK_PACKED); }
+"struct"  { SV_KEYWORD(TOK_STRUCT); }
 
 [0-9][0-9_]* {
 	yylval->string = new std::string(yytext);
@@ -547,4 +549,3 @@ import[ \t\r\n]+\"(DPI|DPI-C)\"[ \t\r\n]+function[ \t\r\n]+ {
 void *frontend_verilog_avoid_input_warnings() {
 	return (void*)&yyinput;
 }
-

@@ -41,6 +41,137 @@ YOSYS_NAMESPACE_BEGIN
 using namespace AST;
 using namespace AST_INTERNAL;
 
+bool is_typedef_struct(AstNode* node) {
+	return (node->type == AST_TYPEDEF) && node->attributes.count(ID("type"));
+}
+
+int get_struct_width(AstNode* struct_node, std::map<std::string, AstNode*>* scope);
+
+int get_wire_width(AstNode* wire, std::map<std::string, AstNode*>* scope) {
+	if (wire->type == AST_STRUCT) {
+		std::string struct_type = wire->attributes["\\wiretype"]->str.c_str();
+		log_assert(current_scope.count(struct_type) == 1);
+		AstNode *cust_type = current_scope.at(struct_type)->children.at(0);
+		return get_struct_width(cust_type, scope);
+	} else if (wire->children.size() == 1 && wire->children[0]->type == AST_RANGE) {
+		return wire->children[0]->children[0]->integer - wire->children[0]->children[1]->integer + 1;
+	} else {
+		return 1;
+	}
+}
+
+int get_struct_width(AstNode* struct_node, std::map<std::string, AstNode*>* scope) {
+	if (struct_node->range_left >= 0)
+		return struct_node->range_left + 1;
+
+	int width = 0;
+	for (auto c: struct_node->children) {
+		width += get_wire_width(c, scope);
+	}
+
+	return width;
+}
+
+AstNode *get_struct_type(AstNode *wire) {
+	if (wire->type != AST_WIRE)
+		return NULL;
+
+	if (!wire->attributes.count("\\wiretype"))
+		return NULL;
+
+	std::string struct_type = wire->attributes["\\wiretype"]->str.c_str();
+	log_assert(current_scope.count(struct_type) == 1);
+
+	AstNode *typedef_type = current_scope.at(struct_type);
+
+	if (typedef_type->children.at(0)->type != AST_STRUCT)
+		return NULL;
+
+	return typedef_type->children.at(0);
+}
+
+void enum_struct_sub_wires(std::vector<AstNode*>* children, AstNode* base, std::string context_name, AstNode* curr, int offset, std::map<std::string, AstNode*>* scope) {
+
+
+	// AstNode *curr_type = current_scope.at(curr->children[0]->str);
+	// AstNode *curr_type = curr;
+
+	// std::string struct_type = curr->attributes["\\wiretype"]->str.c_str();
+	// log_assert(current_scope.count(struct_type) == 1);
+	// AstNode *curr_type = current_scope.at(struct_type)->children.at(0);
+
+	AstNode *curr_type = get_struct_type(curr);
+
+	printf("***************************************\n");
+	printf("%s\n", base->str.c_str());
+	printf("***************************************\n");
+
+	for (auto it = curr_type->children.rbegin(); it != curr_type->children.rend(); ++it) {
+	// for (auto c: curr_type->children) {
+
+		AstNode* c = *it;
+
+		std::stringstream sstr;
+		sstr << context_name << "." << c->str.substr(1);
+
+		AstNode *field_wire;
+		// if (!c->is_custom_type) {
+		if (c->type != AST_STRUCT) {
+			field_wire = c->clone();
+		} else {
+			// AstNode *field_type = get_struct_type(c);
+
+			std::string field_struct_type = c->attributes["\\wiretype"]->str.c_str();
+			log_assert(current_scope.count(field_struct_type) == 1);
+			AstNode *field_type = current_scope.at(field_struct_type)->children.at(0);
+
+			// AstNode *field_type = current_scope.at(c->children[0]->str);
+			int width = get_struct_width(field_type, scope);
+
+			field_wire = new AstNode(AST_WIRE,
+															 new AstNode(AST_RANGE,
+																					 AstNode::mkconst_int(width - 1, true),
+																					 AstNode::mkconst_int(0, true)));
+			field_wire->range_left = field_type->range_left;
+			field_wire->range_right = field_type->range_right;
+		}
+
+		int field_width = get_wire_width(field_wire, scope);
+		AstNode* rng = new AstNode(AST_RANGE,
+															 AstNode::mkconst_int(field_width + offset - 1, true),
+															 AstNode::mkconst_int(offset, true));
+
+
+
+		field_wire->str = sstr.str();
+		printf("%s: [%d:%d]\n", field_wire->str.c_str(), field_width + offset - 1, offset);
+
+
+		children->push_back(field_wire);
+		current_scope[field_wire->str] = field_wire;
+
+		AstNode* target = new AstNode(AST_IDENTIFIER);
+		target->str = field_wire->str;
+		target->id2ast = field_wire;
+
+		AstNode* source = new AstNode(AST_IDENTIFIER, rng);
+		source->str = base->str;
+		source->id2ast = base;
+
+		AstNode *assign = new AstNode(AST_ASSIGN, target, source);
+
+		children->push_back(assign);
+
+		// if (c->is_custom_type) {
+		if (c->type == AST_STRUCT) {
+			enum_struct_sub_wires(children, base, field_wire->str, c, offset, scope);
+		}
+
+		offset += field_width;
+
+	}
+}
+
 // Process a format string and arguments for $display, $write, $sprintf, etc
 
 std::string AstNode::process_format_str(const std::string &sformat, int next_arg, int stage, int width_hint, bool sign_hint) {
@@ -431,6 +562,17 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 			if (node->type == AST_PARAMETER || node->type == AST_LOCALPARAM || node->type == AST_WIRE || node->type == AST_AUTOWIRE || node->type == AST_MEMORY || node->type == AST_TYPEDEF)
 				while (node->simplify(true, false, false, 1, -1, false, node->type == AST_PARAMETER || node->type == AST_LOCALPARAM))
 					did_something = true;
+
+			if ((node->type == AST_WIRE) && (get_struct_type(node) != NULL)) {
+				if (!node->attributes.count("\\struct_exploded")) {
+					std::vector<AstNode *> struct_children;
+					enum_struct_sub_wires(&struct_children, node, node->str, node, 0, &current_scope);
+					children.insert(children.begin() + i + 1, struct_children.begin(), struct_children.end());
+					node->attributes["\\struct_exploded"] = mkconst_int(1, false);
+					i += struct_children.size();
+				}
+			}
+
 			if (node->type == AST_ENUM) {
 				for (auto enode YS_ATTRIBUTE(unused) : node->children){
 					log_assert(enode->type==AST_ENUM_ITEM);
@@ -829,7 +971,7 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 	// resolve typedefs
 	if (type == AST_TYPEDEF) {
 		log_assert(children.size() == 1);
-		log_assert(children[0]->type == AST_WIRE || children[0]->type == AST_MEMORY);
+		log_assert(children[0]->type == AST_WIRE || children[0]->type == AST_MEMORY || children[0]->type == AST_STRUCT);
 		while(children[0]->simplify(const_fold, at_zero, in_lvalue, stage, width_hint, sign_hint, in_param))
 			did_something = true;
 		log_assert(!children[0]->is_custom_type);
@@ -843,8 +985,10 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 			if (!current_scope.count(children[0]->str))
 				log_file_error(filename, location.first_line, "Unknown identifier `%s' used as type name\n", children[0]->str.c_str());
 			AstNode *resolved_type = current_scope.at(children[0]->str);
+
 			if (resolved_type->type != AST_TYPEDEF)
 				log_file_error(filename, location.first_line, "`%s' does not name a type\n", children[0]->str.c_str());
+
 			log_assert(resolved_type->children.size() == 1);
 			AstNode *templ = resolved_type->children[0];
 			// Remove type reference
@@ -856,6 +1000,7 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 
 			if (type == AST_WIRE)
 				type = templ->type;
+
 			is_reg = templ->is_reg;
 			is_logic = templ->is_logic;
 			is_signed = templ->is_signed;
@@ -866,8 +1011,26 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 			range_swapped = templ->range_swapped;
 			range_left = templ->range_left;
 			range_right = templ->range_right;
+
 			attributes["\\wiretype"] = mkconst_str(resolved_type->str);
-			//check if enum
+
+			if (templ->type == AST_STRUCT) {
+				  type = AST_WIRE;
+					is_logic = true;
+					is_signed = false;
+					is_custom_type = false;
+					range_valid = true;
+					range_left = get_struct_width(templ, &current_scope) - 1;
+					range_right = 0;
+
+					AstNode *rng = new AstNode(AST_RANGE);
+					rng->children.push_back(AstNode::mkconst_int(range_left, true));
+					rng->children.push_back(AstNode::mkconst_int(0, true));
+					children.clear();
+					children.insert(children.begin(), rng);
+			}
+
+			// check if enum
 			if (templ->attributes.count("\\enum_type")){
 				//get reference to enum node:
 				std::string enum_type = templ->attributes["\\enum_type"]->str.c_str();
@@ -924,9 +1087,11 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 				}
 			}
 
-			// Insert clones children from template at beginning
-			for (int i  = 0; i < GetSize(templ->children); i++)
-				children.insert(children.begin() + i, templ->children[i]->clone());
+			if (templ->type != AST_STRUCT) {
+				// Insert clones children from template at beginning
+				for (int i = 0; i < GetSize(templ->children); i++)
+					children.insert(children.begin() + i, templ->children[i]->clone());
+			}
 
 			if (type == AST_MEMORY && GetSize(children) == 1) {
 				// Single-bit memories must have [0:0] range
@@ -3193,27 +3358,61 @@ void AstNode::expand_genblock(std::string index_var, std::string prefix, std::ma
 	std::map<std::string, std::string> backup_name_map;
 
 	for (size_t i = 0; i < children.size(); i++) {
+
 		AstNode *child = children[i];
-		if (child->type == AST_WIRE || child->type == AST_MEMORY || child->type == AST_PARAMETER || child->type == AST_LOCALPARAM ||
-				child->type == AST_FUNCTION || child->type == AST_TASK || child->type == AST_CELL || child->type == AST_TYPEDEF || child->type == AST_ENUM_ITEM) {
-			if (backup_name_map.size() == 0)
-				backup_name_map = name_map;
-			std::string new_name = prefix[0] == '\\' ? prefix.substr(1) : prefix;
-			size_t pos = child->str.rfind('.');
-			if (pos == std::string::npos)
-				pos = child->str[0] == '\\' && prefix[0] == '\\' ? 1 : 0;
-			else
-				pos = pos + 1;
-			new_name = child->str.substr(0, pos) + new_name + child->str.substr(pos);
-			if (new_name[0] != '$' && new_name[0] != '\\')
-				new_name = prefix[0] + new_name;
-			name_map[child->str] = new_name;
-			if (child->type == AST_FUNCTION)
-				replace_result_wire_name_in_function(child, child->str, new_name);
-			else
-				child->str = new_name;
-			current_scope[new_name] = child;
+
+		if (child->type == AST_WIRE && child->is_custom_type) {
+			log_assert(child->children.size() >= 1);
+			log_assert(child->children[0]->type == AST_WIRETYPE);
+			std::string type_name = child->children[0]->str;
+
+			if (name_map.count(type_name)) {
+				type_name = name_map[type_name];
+			}
+
+			if (!current_scope.count(type_name))
+				   log_file_error(filename, location.first_line, "Unknown identifier `%s' used as type name\n", type_name.c_str());
+			AstNode *resolved_type = current_scope.at(type_name);
+
+			if (resolved_type->type != AST_TYPEDEF)
+				log_file_error(filename, location.first_line, "`%s' does not name a type\n", children[0]->str.c_str());
+
+			log_assert(resolved_type->children.size() == 1);
+			AstNode *templ = resolved_type->children[0];
+
+			if (templ->type == AST_STRUCT)
+			{
+				child->attributes["\\wiretype"] = mkconst_str(resolved_type->str);
+				child->attributes["\\struct_exploded"] = mkconst_int(1, false);
+
+				std::vector<AstNode *> struct_children;
+				enum_struct_sub_wires(&struct_children, child, child->str, child, 0, &current_scope);
+				children.insert(children.begin() + i + 1, struct_children.begin(), struct_children.end());
+			}
 		}
+
+		if (child->type == AST_WIRE || child->type == AST_MEMORY || child->type == AST_PARAMETER || child->type == AST_LOCALPARAM ||
+			    child->type == AST_FUNCTION || child->type == AST_TASK || child->type == AST_CELL || child->type == AST_TYPEDEF ||
+			    child->type == AST_ENUM_ITEM) {
+				if (backup_name_map.size() == 0)
+					backup_name_map = name_map;
+				std::string new_name = prefix[0] == '\\' ? prefix.substr(1) : prefix;
+				size_t pos = child->str.rfind('.');
+				if (pos == std::string::npos)
+					pos = child->str[0] == '\\' && prefix[0] == '\\' ? 1 : 0;
+				else
+					pos = pos + 1;
+				new_name = child->str.substr(0, pos) + new_name + child->str.substr(pos);
+				if (new_name[0] != '$' && new_name[0] != '\\')
+					new_name = prefix[0] + new_name;
+				name_map[child->str] = new_name;
+				if (child->type == AST_FUNCTION)
+					replace_result_wire_name_in_function(child, child->str, new_name);
+				else
+					child->str = new_name;
+				current_scope[new_name] = child;
+			}
+
 		if (child->type == AST_ENUM){
 			current_scope[child->str] = child;
 			for (auto enode : child->children){
@@ -3243,7 +3442,7 @@ void AstNode::expand_genblock(std::string index_var, std::string prefix, std::ma
 		// still needs to recursed-into
 		if (type == AST_PREFIX && i == 1 && child->type == AST_IDENTIFIER)
 			continue;
-		if (child->type != AST_FUNCTION && child->type != AST_TASK)
+		if (child->type != AST_FUNCTION && child->type != AST_TASK && child->type != AST_STRUCT)
 			child->expand_genblock(index_var, prefix, name_map);
 	}
 
